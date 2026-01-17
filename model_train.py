@@ -2,67 +2,85 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, r2_score
 import joblib
 
+# ---------------------------------------------------------
+# 1. LOAD THE REAL DATA
+# ---------------------------------------------------------
+try:
+    df = pd.read_csv('golf_stats_history.csv')
+    print(f"Successfully loaded {len(df)} player records.")
+except FileNotFoundError:
+    print("Error: 'golf_stats_history.csv' not found. Please run scraper.py first.")
+    exit()
 
 # ---------------------------------------------------------
-# 1. GENERATE MOCK DATA (Replace this with your real CSV load)
+# 2. FEATURE ENGINEERING
 # ---------------------------------------------------------
-def generate_mock_data(n_rows=1000):
-    np.random.seed(42)
-    players = ['Scottie Scheffler', 'Rory McIlroy', 'Xander Schauffele',
-               'Viktor Hovland', 'Ludvig Aberg', 'Max Homa', 'Patrick Cantlay',
-               'Collin Morikawa', 'Jordan Spieth', 'Justin Thomas']
+# We need to create a target variable that represents "DFS Fantasy Points".
+# Since we have summary data, we will engineer a "Fantasy Potential Score" per round.
+# Formula: Base 50pts + (Birdies * 3) + (Beating Par * 1.5)
+# This approximates a good DraftKings/FanDuel round score.
 
-    data = []
-    for _ in range(n_rows):
-        player = np.random.choice(players)
-        # Random stats logic to make it somewhat realistic
-        sg_ott = np.random.normal(0.5, 0.8)  # Off the tee
-        sg_app = np.random.normal(0.5, 0.9)  # Approach
-        sg_putt = np.random.normal(0, 1.0)  # Putting
-        course_difficulty = np.random.choice([0.8, 1.0, 1.2])  # Hard, Medium, Easy
+# Note: SCORE is scoring average. 72 is par.
+df['Fantasy_Proxy'] = 50 + (df['BIRDS'] * 3) + ((72 - df['SCORE']) * 1.5)
 
-        # Target: DFS Points (correlated with stats)
-        # Base score + stats weight + randomness
-        dfs_points = 60 + (sg_ott * 5) + (sg_app * 8) + (sg_putt * 3) + np.random.normal(0, 5)
+# Select the Features (The stats that predict the score)
+# DDIS = Driving Distance
+# DACC = Driving Accuracy
+# GIR  = Greens in Regulation %
+# PUTTS = Putting Average
+# SAND = Sand Save %
+feature_cols = ['DDIS', 'DACC', 'GIR', 'PUTTS', 'SAND']
+target_col = 'Fantasy_Proxy'
 
-        data.append([player, sg_ott, sg_app, sg_putt, course_difficulty, dfs_points])
-
-    return pd.DataFrame(data, columns=['Player', 'SG_OTT', 'SG_APP', 'SG_PUTT', 'Course_Diff', 'DFS_Points'])
-
-
-# LOAD DATA
-print("Loading data...")
-df = generate_mock_data(2000)
-# In real life: df = pd.read_csv('pga_data_2024.csv')
+# Clean data (Drop any rows where stats might be missing/zero)
+df_clean = df[feature_cols + [target_col]].dropna()
 
 # ---------------------------------------------------------
-# 2. PREPROCESSING
+# 3. SPLIT DATA
 # ---------------------------------------------------------
-# We drop 'Player' for training because the model shouldn't memorize names,
-# it should learn from the stats.
-X = df[['SG_OTT', 'SG_APP', 'SG_PUTT', 'Course_Diff']]
-y = df['DFS_Points']
+X = df_clean[feature_cols]
+y = df_clean[target_col]
 
-# Split data
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
 # ---------------------------------------------------------
-# 3. TRAIN XGBOOST MODEL
+# 4. TRAIN XGBOOST MODEL
 # ---------------------------------------------------------
-print("Training Model...")
-model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100, learning_rate=0.1)
+print("Training Model on Real Data...")
+
+# XGBoost Regressor
+model = xgb.XGBRegressor(
+    objective='reg:squarederror',
+    n_estimators=500,        # Number of boosting rounds
+    learning_rate=0.05,      # Step size shrinkage
+    max_depth=5,             # Depth of trees
+    random_state=42
+)
+
 model.fit(X_train, y_train)
 
-# Evaluate
+# ---------------------------------------------------------
+# 5. EVALUATE
+# ---------------------------------------------------------
 predictions = model.predict(X_test)
 mae = mean_absolute_error(y_test, predictions)
-print(f"Model Mean Absolute Error: {mae:.2f} DFS Points")
+r2 = r2_score(y_test, predictions)
+
+print("\n--- Model Performance ---")
+print(f"Mean Absolute Error: {mae:.2f} DFS Points")
+print(f"R-Squared (Accuracy): {r2:.2f}")
+
+# Show Feature Importance (What stats matter most?)
+print("\n--- Key Stat Drivers ---")
+importance = model.feature_importances_
+for i, col in enumerate(feature_cols):
+    print(f"{col}: {importance[i]:.4f}")
 
 # ---------------------------------------------------------
-# 4. SAVE THE MODEL
+# 6. SAVE
 # ---------------------------------------------------------
 joblib.dump(model, 'golf_model.pkl')
-print("Model saved as 'golf_model.pkl'")
+print("\nModel saved as 'golf_model.pkl'")
